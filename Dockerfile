@@ -1,15 +1,15 @@
 # Dockerfile with intentional vulnerabilities
-# Using an extremely outdated base image (Ubuntu 16.04) with known CVEs
+# Using an outdated base image (Ubuntu 16.04) with known CVEs
 FROM ubuntu:16.04
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-    openssh-server=1:7.3p1-1ubuntu0.1 \
-    curl=7.47.0-1ubuntu1 \
-    wget=1.17.1-1ubuntu1.5 \
-    git=1:2.7.4-0ubuntu1.9 && \
+    openssh-server \
+    curl \
+    wget \
+    git && \
     rm -rf /var/lib/apt/lists/*
 
 EXPOSE 22
 
-CMD ["/bin/sh", "-c", "echo 'This image has known OS and library vulnerabilities from 2016'"]
+CMD ["/bin/sh", "-c", "echo 'This image has known OS and library vulnerabilities from Ubuntu 16.04'"]
