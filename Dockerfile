@@ -1,11 +1,9 @@
 # Dockerfile (updated)
-# Dockerfile with intentional vulnerabilities
-# Using an extremely outdated base image (Ubuntu 16.04) with known CVEs
+# Uses a supported base image and avoids pinning fragile package versions.
 FROM ubuntu:22.04
 
-# Use supported base and avoid pinning exact package versions (fragile).
-# If you specifically need the old, pinned Ubuntu 16.04 environment for Bedrock
-# testing, see `Dockerfile.orig` and `Dockerfile.bak` (both backups of the original).
+# Install common tooling without pinning to specific (old) versions.
+# Keep `Dockerfile.orig` as a backup of the previous intentionally-vulnerable image.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     openssh-server \
