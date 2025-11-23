@@ -189,10 +189,13 @@ def extract_possible_text(raw: str) -> str:
         is_custom_marker = line.startswith('*** Begin Patch')
         # Use regex for precise hunk header matching: @@ -line,count +line,count @@
         is_hunk_header = re.match(r'^@@\s+-\d+,?\d*\s+\+\d+,?\d*\s+@@', line) is not None
-        # Check for unified diff header: --- a/path or --- /absolute/path
-        is_unified_diff_header = line.startswith('--- a/') or line.startswith('--- /')
+        # Check for unified diff header: --- a/path, --- /path, or --- path (with space and content)
+        # This catches: git format (a/), absolute paths (/), and standard diff format
+        is_unified_diff_header = (line.startswith('--- a/') or 
+                                   line.startswith('--- /') or
+                                   (line.startswith('--- ') and len(line) > 4 and not line[4:].strip() == ''))
         # Check for +++ following a --- line (make sure idx > 0 to avoid accessing lines[-1])
-        is_plus_after_minus = idx > 0 and line.startswith('+++') and lines[idx-1].startswith('--- ')
+        is_plus_after_minus = idx > 0 and line.startswith('+++') and lines[idx-1].startswith('---')
         
         if is_diff_git or is_custom_marker or is_hunk_header or is_unified_diff_header or is_plus_after_minus:
             patch_start_idx = idx
