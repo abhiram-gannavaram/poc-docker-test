@@ -34,12 +34,16 @@ vulnerabilities found by Trivy.
 
 Rules:
 - Return ONLY a unified diff (for example with '@@' hunks, or 'diff --git a/... b/...' markers).
+- Do NOT include any explanations, reasoning, thinking process, or commentary.
 - Do NOT invent binary patches or include secrets.
 - Make minimal safe changes and include a short one-line comment in the diff header describing the change.
 - If you cannot safely produce a textual patch, return an empty string.
+- Start your response immediately with the patch content. Do not include any preamble.
 
 Trivy summary:
 {trivy_summary}
+
+Output (patch only):
 """
 
 MOCK_PATCH_EXAMPLE = """*** Begin Patch
@@ -86,7 +90,21 @@ def call_bedrock(model_arn: str, prompt: str, max_retries: int = 3, backoff: int
     if boto3 is None:
         raise RuntimeError("boto3 is required to call Bedrock but is not installed in this environment.")
     client = boto3.client("bedrock-runtime")
-    body = {"input": prompt}
+    
+    # Prepare request body with parameters optimized for Claude models
+    # Include stop sequences to prevent the model from continuing with explanations
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.0,  # Use deterministic output
+        "stop_sequences": ["\n\nHuman:", "Explanation:", "Note:", "Reasoning:", "Here's why:"]
+    }
     body_bytes = json.dumps(body).encode("utf-8")
     attempt = 0
     while attempt < max_retries:
@@ -118,15 +136,52 @@ def extract_possible_text(raw: str) -> str:
     raw_str = raw.strip()
     try:
         j = json.loads(raw_str)
-        # prefer obvious text keys
-        for k in ("content", "text", "output", "body"):
-            if isinstance(j, dict) and k in j and isinstance(j[k], str):
-                return j[k].strip()
-        # otherwise, if it's a string in JSON, return that
-        if isinstance(j, str):
-            return j
+        # Claude/Anthropic models return content in a specific format
+        if isinstance(j, dict):
+            # Try to extract from Claude's response format
+            if "content" in j:
+                content = j["content"]
+                # Handle both list and direct text formats
+                if isinstance(content, list) and len(content) > 0:
+                    # Claude returns content as a list of objects with "text" field
+                    if isinstance(content[0], dict) and "text" in content[0]:
+                        raw_str = content[0]["text"].strip()
+                    else:
+                        raw_str = str(content[0]).strip()
+                elif isinstance(content, str):
+                    raw_str = content.strip()
+            # Try other common keys
+            elif "text" in j and isinstance(j["text"], str):
+                raw_str = j["text"].strip()
+            elif "output" in j and isinstance(j["output"], str):
+                raw_str = j["output"].strip()
+            elif "body" in j and isinstance(j["body"], str):
+                raw_str = j["body"].strip()
+            # If it's a string wrapped in JSON, return that
+            elif isinstance(j, str):
+                raw_str = j
     except Exception:
         pass
+    
+    # Now strip out any thinking/reasoning text that might appear before the patch
+    # Look for common patterns that indicate the start of actual patch content
+    lines = raw_str.split('\n')
+    patch_start_idx = -1
+    
+    for idx, line in enumerate(lines):
+        # Check if this line looks like the start of a patch
+        if (line.startswith('diff --git') or 
+            line.startswith('---') or 
+            line.startswith('*** Begin Patch') or
+            line.startswith('@@') or
+            (line.startswith('+++') and idx > 0 and lines[idx-1].startswith('---'))):
+            patch_start_idx = idx
+            break
+    
+    # If we found a patch start, return from that point onward
+    if patch_start_idx >= 0:
+        return '\n'.join(lines[patch_start_idx:])
+    
     return raw_str
 
 def main() -> None:
