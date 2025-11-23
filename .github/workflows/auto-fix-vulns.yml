@@ -4,6 +4,11 @@ on:
   push:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      real_bedrock:
+        description: 'Set to true to call real Bedrock (requires AWS creds/OIDC)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -16,8 +21,11 @@ env:
   AWS_ACCOUNT_ID: 362015461740
   BEDROCK_MODEL_ARN: "arn:aws:bedrock:us-east-1:362015461740:model/ANTHROPIC_SONNET_4_5_MODEL_ID" # update if needed
   ASSUME_ROLE_ARN: "arn:aws:iam::362015461740:role/bedrock-test-role"
-  MOCK_BEDROCK: "true" # set to "false" to call Bedrock for real
+  # MOCK_BEDROCK: default to true; when workflow_dispatch input `real_bedrock` is 'true', set to false
+  MOCK_BEDROCK: "${{ github.event.inputs.real_bedrock == 'true' && 'false' || 'true' }}"
   IMAGE_NAME: "vuln-sample"
+  # Minimum total vulnerabilities (any severity) required to call Bedrock
+  MIN_VULN_TO_CALL_BEDROCK: "1"
 
 jobs:
   scan_and_fix:
@@ -68,16 +76,21 @@ jobs:
             echo "critical=0" >> $GITHUB_OUTPUT
             exit 0
           fi
-
           HIGH=$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity=="HIGH")] | length' trivy-report.json 2>/dev/null || echo 0)
           CRIT=$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity=="CRITICAL")] | length' trivy-report.json 2>/dev/null || echo 0)
+          TOTAL=$(jq '[.Results[]? | (.Vulnerabilities // [])[]?] | length' trivy-report.json 2>/dev/null || echo 0)
 
           echo "high=$HIGH" >> $GITHUB_OUTPUT
           echo "critical=$CRIT" >> $GITHUB_OUTPUT
-          if [ "$((HIGH + CRIT))" -eq 0 ]; then
-            echo "call_bedrock=false" >> $GITHUB_OUTPUT
-          else
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+
+          # Decide to call Bedrock when there are any HIGH/CRITICAL vulnerabilities
+          # or when total vulnerabilities meet/exceed the configured threshold
+          THRESH=${{ env.MIN_VULN_TO_CALL_BEDROCK }}
+          if [ "$((HIGH + CRIT))" -gt 0 ] || [ "$TOTAL" -ge "$THRESH" ]; then
             echo "call_bedrock=true" >> $GITHUB_OUTPUT
+          else
+            echo "call_bedrock=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Configure AWS credentials (try OIDC role-to-assume)
@@ -138,9 +151,12 @@ jobs:
             echo "patch_exists=false" >> $GITHUB_OUTPUT
           fi
 
-          # Save a truncated preview for debugging
+          # Save a truncated preview for debugging and also print first 20 lines to the job log
           head -n 200 "$PATCH" > artifacts/patch_preview.txt || true
           echo "wrote artifacts/patch_preview.txt"
+          echo "---- patch preview (first 20 lines) ----"
+          head -n 20 artifacts/patch_preview.txt || true
+          echo "---- end preview ----"
 
       - name: Validate & apply patch (create branch)
         id: create_branch
