@@ -159,7 +159,7 @@ def extract_possible_text(raw: str) -> str:
             if "content" in j:
                 content = j["content"]
                 # Handle both list and direct text formats
-                if isinstance(content, list) and len(content) > 0:
+                if isinstance(content, list) and content:
                     # Claude returns content as a list of objects with "text" field
                     if isinstance(content[0], dict) and "text" in content[0]:
                         raw_str = content[0]["text"].strip()
@@ -184,14 +184,13 @@ def extract_possible_text(raw: str) -> str:
     
     for idx, line in enumerate(lines):
         # Check if this line looks like the start of a patch
-        # Use specific patterns to avoid false positives
-        if (line.startswith('diff --git') or 
-            line.startswith('*** Begin Patch') or
-            (line.startswith('@@') and '-' in line and '+' in line) or
-            # Check for unified diff header: --- a/path or --- /absolute/path
-            (line.startswith('--- a/') or (line.startswith('--- /') and len(line) > 4)) or
-            # Check for +++ following a --- line
-            (line.startswith('+++') and idx > 0 and lines[idx-1].startswith('--- '))):
+        is_diff_git = line.startswith('diff --git')
+        is_custom_marker = line.startswith('*** Begin Patch')
+        is_hunk_header = line.startswith('@@') and '-' in line and '+' in line
+        is_unified_diff_header = line.startswith('--- a/') or (line.startswith('--- /') and len(line) > 4)
+        is_plus_after_minus = line.startswith('+++') and idx > 0 and lines[idx-1].startswith('--- ')
+        
+        if is_diff_git or is_custom_marker or is_hunk_header or is_unified_diff_header or is_plus_after_minus:
             patch_start_idx = idx
             break
     
