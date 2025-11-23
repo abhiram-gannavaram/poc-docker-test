@@ -13,7 +13,7 @@ env:
   AWS_ACCOUNT_ID: 362015461740
   BEDROCK_MODEL_ARN: "arn:aws:bedrock:us-east-1:362015461740:model/ANTHROPIC_SONNET_4_5_MODEL_ID" # replace with real model ARN
   ASSUME_ROLE_ARN: "arn:aws:iam::362015461740:role/bedrock-test-role" # role to assume for Bedrock invocation
-  MOCK_BEDROCK: "true" # set to "false" to call real Bedrock (ensure credentials and model ARN are correct)
+  MOCK_BEDROCK: "false" # set to "true" to mock Bedrock (no AWS credentials required). Set to "false" to call real Bedrock (ensure credentials and model ARN are correct)
 
 jobs:
   scan_and_fix:
@@ -40,7 +40,30 @@ jobs:
 
       - name: Show basic scan summary
         run: |
-          jq '.Results[].Vulnerabilities | length' trivy-report.json || true
+          if [ -f trivy-report.json ]; then
+            echo "Trivy findings summary (target: #vulnerabilities):"
+            # Safely handle cases where .Vulnerabilities may be null
+            jq -r '.Results[] | (.Target // "<unknown>") + ": " + ((.Vulnerabilities // []) | length | tostring)' trivy-report.json || true
+          else
+            echo "trivy-report.json not found"
+          fi
+
+      - name: Trivy jq-safe diagnostics & total count
+        run: |
+          if [ ! -f trivy-report.json ]; then
+            echo "trivy-report.json not found - skipping diagnostics"
+            echo "trivy_total_vulnerabilities=0" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "--- trivy-report.json (first 200 lines) ---"
+          sed -n '1,200p' trivy-report.json || true
+          echo "--- per-target vulnerability counts ---"
+          # Print per-target counts safely (handles null Vulnerabilities)
+          jq -r '.Results[] | (.Target // "<unknown>") + ": " + ((.Vulnerabilities // []) | length | tostring)' trivy-report.json || true
+          # Compute total vulnerabilities across all results (handle nulls)
+          TOTAL=$(jq '[.Results[]? | (.Vulnerabilities // [])[]?] | length' trivy-report.json 2>/dev/null || echo 0)
+          echo "Total vulnerabilities: $TOTAL"
+          echo "trivy_total_vulnerabilities=$TOTAL" >> $GITHUB_OUTPUT
 
       - name: Configure AWS credentials (assume role)
         if: env.MOCK_BEDROCK == 'false'
@@ -109,7 +132,8 @@ jobs:
         if: steps.bedrock_suggest.outputs.patch_path != ''
         run: |
           cat trivy-report-after.json || true
-          jq '.Results[].Vulnerabilities | length' trivy-report-after.json || true
+          # Safely handle null Vulnerabilities fields when summarizing
+          jq -r '.Results[] | (.Target // "<unknown>") + ": " + ((.Vulnerabilities // []) | length | tostring)' trivy-report-after.json || true
 
       - name: Create Pull Request if vulnerabilities are fixed
         if: steps.bedrock_suggest.outputs.patch_path != ''
