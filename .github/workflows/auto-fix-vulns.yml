@@ -14,9 +14,9 @@ permissions:
 env:
   AWS_REGION: us-east-1
   AWS_ACCOUNT_ID: 362015461740
-  BEDROCK_MODEL_ARN: "arn:aws:bedrock:us-east-1:362015461740:model/ANTHROPIC_SONNET_4_5_MODEL_ID" # replace as needed
+  BEDROCK_MODEL_ARN: "arn:aws:bedrock:us-east-1:362015461740:model/ANTHROPIC_SONNET_4_5_MODEL_ID" # update if needed
   ASSUME_ROLE_ARN: "arn:aws:iam::362015461740:role/bedrock-test-role"
-  MOCK_BEDROCK: "true" # set to "false" to call real Bedrock
+  MOCK_BEDROCK: "true" # set to "false" to call Bedrock for real
   IMAGE_NAME: "vuln-sample"
 
 jobs:
@@ -48,27 +48,30 @@ jobs:
 
       - name: Show basic scan summary
         run: |
-          if [ -f trivy-report.json ]; then
-            echo "Basic per-target summary (target: vulnerabilities)"
-            jq -r '.Results[] | (.Target // "<unknown>") + ": " + ((.Vulnerabilities // []) | length | tostring)' trivy-report.json || true
+          if [ -f trivy-report.json ] && [ -s trivy-report.json ]; then
+            echo "Trivy per-target vulnerability counts (target: vulnerabilities):"
+            jq -r '.Results[]? | (.Target // "<unknown>") + ": " + ((.Vulnerabilities // []) | length | tostring)' trivy-report.json || true
             TOTAL=$(jq '[.Results[]? | (.Vulnerabilities // [])[]?] | length' trivy-report.json 2>/dev/null || echo 0)
+            echo "Total vulnerabilities: $TOTAL"
             echo "trivy_total_vulnerabilities=$TOTAL" >> $GITHUB_OUTPUT
           else
-            echo "trivy-report.json not found"
+            echo "trivy-report.json missing or empty"
             echo "trivy_total_vulnerabilities=0" >> $GITHUB_OUTPUT
           fi
 
       - name: Decide whether to call Bedrock (HIGH + CRITICAL)
         id: decide_bedrock
         run: |
-          if [ ! -f trivy-report.json ]; then
+          if [ ! -f trivy-report.json ] || [ ! -s trivy-report.json ]; then
             echo "call_bedrock=false" >> $GITHUB_OUTPUT
             echo "high=0" >> $GITHUB_OUTPUT
             echo "critical=0" >> $GITHUB_OUTPUT
             exit 0
           fi
-          HIGH=$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity=="HIGH") ] | length' trivy-report.json)
-          CRIT=$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity=="CRITICAL") ] | length' trivy-report.json)
+
+          HIGH=$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity=="HIGH")] | length' trivy-report.json 2>/dev/null || echo 0)
+          CRIT=$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity=="CRITICAL")] | length' trivy-report.json 2>/dev/null || echo 0)
+
           echo "high=$HIGH" >> $GITHUB_OUTPUT
           echo "critical=$CRIT" >> $GITHUB_OUTPUT
           if [ "$((HIGH + CRIT))" -eq 0 ]; then
@@ -116,7 +119,7 @@ jobs:
             echo "patch_path=" >> $GITHUB_OUTPUT
           fi
 
-      - name: Validate & apply patch (create branch) 
+      - name: Validate & apply patch (create branch)
         id: create_branch
         if: steps.bedrock_suggest.outputs.patch_path != ''
         run: |
@@ -124,24 +127,36 @@ jobs:
           PATCH="${{ steps.bedrock_suggest.outputs.patch_path }}"
           if [ ! -s "$PATCH" ]; then
             echo "No patch found; exiting"
+            echo "branch=" >> $GITHUB_OUTPUT
             exit 0
           fi
+
           BRANCH="auto-fix/trivy-$(date +%s)"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
-          # Convert custom markers to standard unified diff if necessary (git apply understands many formats)
-          # First, run --check to avoid partial/failed applies
           cp "$PATCH" /tmp/suggested.diff
+
+          # run git apply --check first to ensure the patch applies cleanly
           if ! git apply --check /tmp/suggested.diff; then
             echo "git apply --check failed. Writing diagnostics and aborting."
             echo "apply_check_failed=true" >> $GITHUB_OUTPUT
             echo "branch=" >> $GITHUB_OUTPUT
+            # Save model preview for debugging
+            mkdir -p artifacts
+            head -c 2000 /tmp/suggested.diff > artifacts/patch_preview.txt || true
+            echo "wrote artifacts/patch_preview.txt"
             exit 1
           fi
+
           git apply /tmp/suggested.diff
           git add -A
-          git commit -m "chore: apply auto-suggested fixes from Bedrock" || (echo "Nothing to commit" && true)
+          # commit if there are changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit after applying patch"
+          else
+            git commit -m "chore: apply auto-suggested fixes from Bedrock"
+          fi
           git push --set-upstream origin "$BRANCH"
           echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
@@ -155,32 +170,37 @@ jobs:
         uses: aquasecurity/trivy-action@0.28.0
         with:
           scan-type: 'image'
-          scan-ref: 'vuln-sample:patched'
+          scan-ref: '${{ env.IMAGE_NAME }}:patched'
           format: 'json'
           output: 'trivy-report-after.json'
 
       - name: Show before/after summary and decide PR creation
         id: summarize_after
         run: |
-          # compute original HIGH+CRIT (from earlier step outputs) if available; fallback to reading file
+          set -euo pipefail
+          # original counts from earlier step outputs (fallback to 0)
           ORIG_HIGH=${{ steps.decide_bedrock.outputs.high || '0' }}
           ORIG_CRIT=${{ steps.decide_bedrock.outputs.critical || '0' }}
-          if [ -f trivy-report-after.json ]; then
-            NEW_HIGH=$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity=="HIGH") ] | length' trivy-report-after.json)
-            NEW_CRIT=$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity=="CRITICAL") ] | length' trivy-report-after.json)
+
+          if [ -f trivy-report-after.json ] && [ -s trivy-report-after.json ]; then
+            NEW_HIGH=$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity=="HIGH")] | length' trivy-report-after.json 2>/dev/null || echo 0)
+            NEW_CRIT=$(jq '[.Results[]? | (.Vulnerabilities // [])[]? | select(.Severity=="CRITICAL")] | length' trivy-report-after.json 2>/dev/null || echo 0)
           else
             NEW_HIGH=0
             NEW_CRIT=0
           fi
+
           echo "orig_high=$ORIG_HIGH" >> $GITHUB_OUTPUT
           echo "orig_crit=$ORIG_CRIT" >> $GITHUB_OUTPUT
           echo "new_high=$NEW_HIGH" >> $GITHUB_OUTPUT
           echo "new_crit=$NEW_CRIT" >> $GITHUB_OUTPUT
-          # Decide: create PR if total high+critical decreased OR new is zero
+
           ORIG_SUM=$((ORIG_HIGH + ORIG_CRIT))
           NEW_SUM=$((NEW_HIGH + NEW_CRIT))
+
           echo "orig_sum=$ORIG_SUM" >> $GITHUB_OUTPUT
           echo "new_sum=$NEW_SUM" >> $GITHUB_OUTPUT
+
           if [ "$NEW_SUM" -lt "$ORIG_SUM" ]; then
             echo "create_pr=true" >> $GITHUB_OUTPUT
           else
@@ -205,13 +225,10 @@ jobs:
             - New CRITICAL: ${{ steps.summarize_after.outputs.new_crit }}
 
             Notes:
-            - Patch was produced by an automated model and validated with `git apply --check`.
+            - Patch was produced by an automated model (Bedrock) and validated with `git apply --check`.
             - Please review changes before merging; automated patches should be validated in downstream tests.
           base: main
           head: ${{ steps.create_branch.outputs.branch }}
-        # expose PR URL for job output
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Print results
         run: |
