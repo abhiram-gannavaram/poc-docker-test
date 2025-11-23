@@ -136,8 +136,11 @@ def extract_possible_text(raw: str) -> str:
     raw_str = raw.strip()
     try:
         j = json.loads(raw_str)
+        # Handle string wrapped in JSON first
+        if isinstance(j, str):
+            raw_str = j
         # Claude/Anthropic models return content in a specific format
-        if isinstance(j, dict):
+        elif isinstance(j, dict):
             # Try to extract from Claude's response format
             if "content" in j:
                 content = j["content"]
@@ -157,9 +160,6 @@ def extract_possible_text(raw: str) -> str:
                 raw_str = j["output"].strip()
             elif "body" in j and isinstance(j["body"], str):
                 raw_str = j["body"].strip()
-            # If it's a string wrapped in JSON, return that
-            elif isinstance(j, str):
-                raw_str = j
     except Exception:
         pass
     
@@ -170,11 +170,12 @@ def extract_possible_text(raw: str) -> str:
     
     for idx, line in enumerate(lines):
         # Check if this line looks like the start of a patch
+        # Use more specific patterns to avoid false positives
         if (line.startswith('diff --git') or 
-            line.startswith('---') or 
             line.startswith('*** Begin Patch') or
             line.startswith('@@') or
-            (line.startswith('+++') and idx > 0 and lines[idx-1].startswith('---'))):
+            (line.startswith('--- ') and ('/' in line or line.startswith('--- a/'))) or
+            (line.startswith('+++') and idx > 0 and lines[idx-1].startswith('--- '))):
             patch_start_idx = idx
             break
     
