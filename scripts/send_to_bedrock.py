@@ -15,6 +15,7 @@ Usage (examples):
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from typing import Any, Dict, Optional
@@ -159,7 +160,7 @@ def extract_possible_text(raw: str) -> str:
             if "content" in j:
                 content = j["content"]
                 # Handle both list and direct text formats
-                if isinstance(content, list) and content:
+                if isinstance(content, list) and len(content) > 0:
                     # Claude returns content as a list of objects with "text" field
                     if isinstance(content[0], dict) and "text" in content[0]:
                         raw_str = content[0]["text"].strip()
@@ -186,8 +187,10 @@ def extract_possible_text(raw: str) -> str:
         # Check if this line looks like the start of a patch
         is_diff_git = line.startswith('diff --git')
         is_custom_marker = line.startswith('*** Begin Patch')
-        is_hunk_header = line.startswith('@@') and '-' in line and '+' in line
-        is_unified_diff_header = line.startswith('--- a/') or (line.startswith('--- /') and len(line) > 4)
+        # Use regex for precise hunk header matching: @@ -line,count +line,count @@
+        is_hunk_header = bool(re.match(r'^@@\s+-\d+,?\d*\s+\+\d+,?\d*\s+@@', line))
+        # Check for unified diff header: --- a/path or --- /absolute/path
+        is_unified_diff_header = line.startswith('--- a/') or line.startswith('--- /')
         is_plus_after_minus = line.startswith('+++') and idx > 0 and lines[idx-1].startswith('--- ')
         
         if is_diff_git or is_custom_marker or is_hunk_header or is_unified_diff_header or is_plus_after_minus:
