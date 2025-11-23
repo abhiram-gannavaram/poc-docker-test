@@ -1,34 +1,55 @@
 #!/usr/bin/env python3
 """
-Simple script to send Trivy JSON report to Bedrock (or mock) and produce a suggested patch file.
+scripts/send_to_bedrock.py
 
-Usage:
-  python3 scripts/send_to_bedrock.py --report trivy-report.json --model-arn <ARN> --mock true --out suggested_patch.diff
+Reads a Trivy JSON report and either:
+ - In mock mode: writes a sample unified diff patch to --out
+ - In real mode: calls AWS Bedrock Runtime (boto3) to generate a suggested unified diff,
+   validates that the model output looks like a unified diff, and writes it to --out.
 
-If --mock is true, a sample patch will be written instead of calling Bedrock.
-
-When integrating with Bedrock, replace the mock section with a call to AWS Bedrock runtime API
-(e.g., boto3 client for bedrock-runtime or `aws bedrock-runtime invoke-model`), passing a prompt
-that instructs the model to output a unified diff to fix the Dockerfile / package.json vulnerabilities.
+Usage (examples):
+  python3 scripts/send_to_bedrock.py --report artifacts/trivy-report.json --model-arn "my-model-id-or-arn" --mock true --out artifacts/suggested_patch.diff
+  python3 scripts/send_to_bedrock.py --report artifacts/trivy-report.json --model-arn "my-model-id-or-arn" --mock false --out artifacts/suggested_patch.diff
 """
+
 import argparse
 import json
 import os
 import sys
-from datetime import datetime
+import time
+from typing import Any, Dict, Optional
 
+# Optional import; only needed when mock==false and boto3 available
+try:
+    import boto3  # type: ignore
+except Exception:
+    boto3 = None  # type: ignore
 
-def make_sample_patch():
-    # This sample patch upgrades lodash from 4.17.19 to 4.17.21 and pins Node base image
-    patch = """
-*** Begin Patch
+# Prompt template for Bedrock model. Keep it concise and strict.
+PROMPT_TEMPLATE = """
+You are a conservative code assistant. Input: a Trivy JSON vulnerability summary.
+Your output MUST BE ONLY a git unified diff (a patch) that modifies textual files in the repo
+(Dockerfile, package.json, requirements.txt, Pipfile, etc.) to reduce or fix HIGH/CRITICAL
+vulnerabilities found by Trivy.
+
+Rules:
+- Return ONLY a unified diff (for example with '@@' hunks, or 'diff --git a/... b/...' markers).
+- Do NOT invent binary patches or include secrets.
+- Make minimal safe changes and include a short one-line comment in the diff header describing the change.
+- If you cannot safely produce a textual patch, return an empty string.
+
+Trivy summary:
+{trivy_summary}
+"""
+
+MOCK_PATCH_EXAMPLE = """*** Begin Patch
 *** Update File: Dockerfile
 @@
 -FROM node:12-buster
 +FROM node:18-bullseye
 @@
 -RUN npm install --production
-+RUN npm install --production
++RUN npm ci --production
 *** End Patch
 *** Begin Patch
 *** Update File: package.json
@@ -37,125 +58,153 @@ def make_sample_patch():
 +    "lodash": "4.17.21"
 *** End Patch
 """
-    return patch
 
+def summarize_trivy(trivy: Dict[str, Any]) -> Dict[str, Any]:
+    results = trivy.get("Results", []) or []
+    summary = {"total": 0, "high": 0, "critical": 0, "targets": []}
+    for r in results:
+        target = r.get("Target", "<unknown>")
+        vulns = r.get("Vulnerabilities") or []
+        total = len(vulns)
+        high = sum(1 for v in vulns if (v.get("Severity") or "").upper() == "HIGH")
+        crit = sum(1 for v in vulns if (v.get("Severity") or "").upper() == "CRITICAL")
+        summary["total"] += total
+        summary["high"] += high
+        summary["critical"] += crit
+        summary["targets"].append({"target": target, "total": total, "high": high, "critical": crit})
+    return summary
 
-def write_patch_file(path, content):
-    with open(path, 'w') as f:
-        f.write(content)
-    os.chmod(path, 0o644)
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--report', required=True)
-    parser.add_argument('--model-arn', required=False)
-    parser.add_argument('--mock', required=False, default='true')
-    parser.add_argument('--out', required=True)
-    args = parser.parse_args()
-
-    #!/usr/bin/env python3
-    """
-    Simple script to send Trivy JSON report to Bedrock (or mock) and produce a suggested patch file.
-
-    Usage:
-      python3 scripts/send_to_bedrock.py --report trivy-report.json --model-arn <ARN> --mock true --out suggested_patch.diff
-
-    If --mock is true, a sample patch will be written instead of calling Bedrock.
-
-    When integrating with Bedrock, replace the mock section with a call to AWS Bedrock runtime API
-    (e.g., boto3 client for bedrock-runtime or `aws bedrock-runtime invoke-model`), passing a prompt
-    that instructs the model to output a unified diff to fix the Dockerfile vulnerabilities.
-    """
-    import argparse
-    import json
-    import os
-    import sys
-    from datetime import datetime
-
-
-def make_sample_patch():
-    # This sample patch updates the base image from an outdated Ubuntu 16.04 to a current version
-    patch = """
---- Dockerfile.old	2025-11-22 00:00:00.000000000 +0000
-+++ Dockerfile	2025-11-22 00:00:00.000000000 +0000
-@@ -1,14 +1,14 @@
- # Dockerfile with intentional vulnerabilities
--# Using an extremely outdated base image (Ubuntu 16.04) with known CVEs
--FROM ubuntu:16.04
-+# Updated to current LTS base image
-+FROM ubuntu:22.04
- 
- RUN apt-get update && \\
-     apt-get install -y --no-install-recommends \\
--    openssh-server=1:7.3p1-1ubuntu0.1 \\
--    curl=7.47.0-1ubuntu1 \\
--    wget=1.17.1-1ubuntu1.5 \\
--    git=1:2.7.4-0ubuntu1.9 && \\
-+    openssh-server \\
-+    curl \\
-+    wget \\
-+    git && \\
-     rm -rf /var/lib/apt/lists/*
- 
- EXPOSE 22
- 
--CMD ["/bin/sh", "-c", "echo 'This image has known OS and library vulnerabilities from 2016'"]
-+CMD ["/bin/sh", "-c", "echo 'This image has been patched with updated packages'"]
-"""
-    return patch
-    def write_patch_file(path, content):
-        with open(path, 'w') as f:
-            f.write(content)
+def write_patch_file(path: str, content: str) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    try:
         os.chmod(path, 0o644)
+    except Exception:
+        pass
 
+def call_bedrock(model_arn: str, prompt: str, max_retries: int = 3, backoff: int = 2) -> str:
+    if boto3 is None:
+        raise RuntimeError("boto3 is required to call Bedrock but is not installed in this environment.")
+    client = boto3.client("bedrock-runtime")
+    body = {"input": prompt}
+    body_bytes = json.dumps(body).encode("utf-8")
+    attempt = 0
+    while attempt < max_retries:
+        attempt += 1
+        try:
+            # Use modelId parameter; some deployments accept ARN or modelId string
+            resp = client.invoke_model(modelId=model_arn, contentType="application/json", accept="application/json", body=body_bytes)
+            b = resp.get("body")
+            if hasattr(b, "read"):
+                raw = b.read()
+            else:
+                raw = b
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="replace")
+            return raw
+        except Exception as e:
+            if attempt >= max_retries:
+                raise
+            time.sleep(backoff * attempt)
+    raise RuntimeError("Exhausted retries calling Bedrock")
 
-    def main():
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--report', required=True)
-        parser.add_argument('--model-arn', required=False)
-        parser.add_argument('--mock', required=False, default='true')
-        parser.add_argument('--out', required=True)
-        args = parser.parse_args()
+def looks_like_unified_diff(text: str) -> bool:
+    t = text.strip()
+    # Accept common patterns: @@ hunks, diff --git, or the script's custom markers
+    return ("@@ " in t) or ("diff --git" in t) or ("*** Begin Patch" in t) or (t.startswith("--- ") and "\n+++ " in t)
 
-        if not os.path.exists(args.report):
-            print(f"Trivy report not found: {args.report}")
+def extract_possible_text(raw: str) -> str:
+    # Attempt to parse JSON wrappers (some model SDKs return JSON)
+    raw_str = raw.strip()
+    try:
+        j = json.loads(raw_str)
+        # prefer obvious text keys
+        for k in ("content", "text", "output", "body"):
+            if isinstance(j, dict) and k in j and isinstance(j[k], str):
+                return j[k].strip()
+        # otherwise, if it's a string in JSON, return that
+        if isinstance(j, str):
+            return j
+    except Exception:
+        pass
+    return raw_str
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--report", required=True, help="Trivy JSON report path")
+    parser.add_argument("--model-arn", required=False, default="", help="Bedrock model Id or ARN")
+    parser.add_argument("--mock", required=False, default="true", help="true/false")
+    parser.add_argument("--out", required=True, help="Path to write suggested patch (diff)")
+
+    args = parser.parse_args()
+    mock = str(args.mock).lower() in ("1", "true", "yes")
+
+    if not os.path.exists(args.report):
+        print(f"Trivy report not found: {args.report}", file=sys.stderr)
+        write_patch_file(args.out, "")
+        sys.exit(0)
+
+    with open(args.report, "r", encoding="utf-8") as fh:
+        try:
+            report = json.load(fh)
+        except Exception as e:
+            print(f"Failed to parse trivy report JSON: {e}", file=sys.stderr)
+            write_patch_file(args.out, "")
             sys.exit(1)
 
-        with open(args.report) as f:
-            report = json.load(f)
+    summary = summarize_trivy(report)
+    print("Trivy summary:", json.dumps(summary, indent=2))
 
-        # Basic heuristic: count vulnerabilities
-        vuln_count = 0
-        for res in report.get('Results', []):
-            vulns = res.get('Vulnerabilities') or []
-            vuln_count += len(vulns)
+    # If no high/critical, skip (write empty file)
+    if (summary.get("high", 0) + summary.get("critical", 0)) == 0:
+        print("No HIGH/CRITICAL vulnerabilities found — skipping model call.")
+        write_patch_file(args.out, "")
+        sys.exit(0)
 
-        if vuln_count == 0:
-            print("No vulnerabilities found in report. No patch required.")
-            # write empty file
-            write_patch_file(args.out, "")
-            print(f"Wrote empty patch to {args.out}")
-            return
+    # Mock mode: write example patch for testing pipeline behavior
+    if mock:
+        print("Mock mode enabled — writing example patch to", args.out)
+        write_patch_file(args.out, MOCK_PATCH_EXAMPLE)
+        sys.exit(0)
 
-        if args.mock.lower() == 'true':
-            print(f"Mock mode enabled — generating sample patch for {vuln_count} vulnerabilities")
-            patch = make_sample_patch()
-            write_patch_file(args.out, patch)
-            print(f"Wrote mock suggested patch to {args.out}")
-            return
-
-        # Real Bedrock integration (placeholder) — you must implement this to call Bedrock runtime
-        # Example (pseudo):
-        # prompt = build_prompt_from_trivy(report)
-        # response = call_bedrock(model_arn=args.model_arn, prompt=prompt)
-        # suggested_diff = extract_diff_from_response(response)
-        # write_patch_file(args.out, suggested_diff)
-
-        print("Real Bedrock integration is not implemented in this script. Enable --mock true to test.")
+    # Real Bedrock invocation
+    if not args.model_arn:
+        print("ERROR: model-arn is required when --mock is false", file=sys.stderr)
+        write_patch_file(args.out, "")
         sys.exit(1)
 
+    prompt = PROMPT_TEMPLATE.format(trivy_summary=json.dumps(summary, indent=2))
+    print("Calling Bedrock model:", args.model_arn)
 
-    if __name__ == '__main__':
-        main()
+    try:
+        raw = call_bedrock(args.model_arn, prompt)
+    except Exception as e:
+        print("Bedrock call failed:", str(e), file=sys.stderr)
+        write_patch_file(args.out, "")
+        sys.exit(1)
 
+    candidate = extract_possible_text(raw)
+
+    if not candidate:
+        print("Model returned empty output.", file=sys.stderr)
+        write_patch_file(args.out, "")
+        sys.exit(0)
+
+    # Basic validation: ensure the model output resembles a unified diff
+    if not looks_like_unified_diff(candidate):
+        print("Model output does not look like a unified diff. Refusing to write patch.", file=sys.stderr)
+        # keep a small debug snippet available in a side file for inspection
+        debug_path = args.out + ".model_output_preview.txt"
+        with open(debug_path, "w", encoding="utf-8") as dbg:
+            dbg.write(candidate[:2000])
+        print(f"Wrote model preview to {debug_path} (first 2000 chars).", file=sys.stderr)
+        write_patch_file(args.out, "")
+        sys.exit(1)
+
+    # Save the validated patch
+    write_patch_file(args.out, candidate)
+    print("Wrote suggested patch to", args.out)
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
