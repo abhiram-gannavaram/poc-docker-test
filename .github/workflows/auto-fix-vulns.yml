@@ -119,9 +119,32 @@ jobs:
             echo "patch_path=" >> $GITHUB_OUTPUT
           fi
 
+      - name: Check generated patch
+        id: check_patch
+        run: |
+          set -euo pipefail
+          PATCH="${{ steps.bedrock_suggest.outputs.patch_path }}"
+          mkdir -p artifacts
+          if [ -z "$PATCH" ] || [ ! -s "$PATCH" ]; then
+            echo "No patch file or file empty. Skipping."
+            echo "patch_exists=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Basic sanity check for unified diff content (diff header or ---/+++ lines)
+          if grep -qE '^(diff --git |--- a/|\+\+\+ b/)' "$PATCH"; then
+            echo "patch_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "patch_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Save a truncated preview for debugging
+          head -n 200 "$PATCH" > artifacts/patch_preview.txt || true
+          echo "wrote artifacts/patch_preview.txt"
+
       - name: Validate & apply patch (create branch)
         id: create_branch
-        if: steps.bedrock_suggest.outputs.patch_path != ''
+        if: steps.check_patch.outputs.patch_exists == 'true'
         run: |
           set -euo pipefail
           PATCH="${{ steps.bedrock_suggest.outputs.patch_path }}"
@@ -139,14 +162,15 @@ jobs:
 
           # run git apply --check first to ensure the patch applies cleanly
           if ! git apply --check /tmp/suggested.diff; then
-            echo "git apply --check failed. Writing diagnostics and aborting."
+            echo "git apply --check failed. Writing diagnostics and skipping patch application."
             echo "apply_check_failed=true" >> $GITHUB_OUTPUT
             echo "branch=" >> $GITHUB_OUTPUT
-            # Save model preview for debugging
+            # Save model preview for debugging (truncated)
             mkdir -p artifacts
             head -c 2000 /tmp/suggested.diff > artifacts/patch_preview.txt || true
             echo "wrote artifacts/patch_preview.txt"
-            exit 1
+            # Do not fail the job - treat as no-op so downstream steps are skipped
+            exit 0
           fi
 
           git apply /tmp/suggested.diff
