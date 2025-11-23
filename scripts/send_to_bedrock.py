@@ -78,6 +78,9 @@ def summarize_trivy(trivy: Dict[str, Any]) -> Dict[str, Any]:
         summary["targets"].append({"target": target, "total": total, "high": high, "critical": crit})
     return summary
 
+# Stop sequences to prevent the model from continuing with explanations
+STOP_SEQUENCES = ["\n\nHuman:", "Explanation:", "Note:", "Reasoning:", "Here's why:"]
+
 def write_patch_file(path: str, content: str) -> None:
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
@@ -103,7 +106,7 @@ def call_bedrock(model_arn: str, prompt: str, max_retries: int = 3, backoff: int
             }
         ],
         "temperature": 0.0,  # Use deterministic output
-        "stop_sequences": ["\n\nHuman:", "Explanation:", "Note:", "Reasoning:", "Here's why:"]
+        "stop_sequences": STOP_SEQUENCES
     }
     body_bytes = json.dumps(body).encode("utf-8")
     attempt = 0
@@ -174,7 +177,7 @@ def extract_possible_text(raw: str) -> str:
         if (line.startswith('diff --git') or 
             line.startswith('*** Begin Patch') or
             line.startswith('@@') or
-            (line.startswith('--- ') and ('/' in line or line.startswith('--- a/'))) or
+            (line.startswith('--- ') and '/' in line) or
             (line.startswith('+++') and idx > 0 and lines[idx-1].startswith('--- '))):
             patch_start_idx = idx
             break
