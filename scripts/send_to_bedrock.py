@@ -79,7 +79,18 @@ def summarize_trivy(trivy: Dict[str, Any]) -> Dict[str, Any]:
     return summary
 
 # Stop sequences to prevent the model from continuing with explanations
-STOP_SEQUENCES = ["\n\nHuman:", "Explanation:", "Note:", "Reasoning:", "Here's why:"]
+STOP_SEQUENCES = [
+    "\n\nHuman:", 
+    "Explanation:", 
+    "Note:", 
+    "Reasoning:", 
+    "Here's why:", 
+    "Let me think:",
+    "First,",
+    "To solve this:",
+    "Analysis:",
+    "Summary:"
+]
 
 def write_patch_file(path: str, content: str) -> None:
     with open(path, "w", encoding="utf-8") as fh:
@@ -173,11 +184,15 @@ def extract_possible_text(raw: str) -> str:
     
     for idx, line in enumerate(lines):
         # Check if this line looks like the start of a patch
-        # Use more specific patterns to avoid false positives
+        # Use specific patterns to avoid false positives
+        stripped = line.strip()
         if (line.startswith('diff --git') or 
             line.startswith('*** Begin Patch') or
-            line.startswith('@@') or
-            (line.startswith('--- ') and '/' in line) or
+            (line.startswith('@@') and '-' in line and '+' in line) or
+            # Check for unified diff header: --- a/path or --- /path
+            (line.startswith('--- ') and (line.startswith('--- a/') or line.startswith('--- b/') or 
+                                          (len(line) > 4 and line[4] == '/'))) or
+            # Check for +++ following a --- line
             (line.startswith('+++') and idx > 0 and lines[idx-1].startswith('--- '))):
             patch_start_idx = idx
             break
