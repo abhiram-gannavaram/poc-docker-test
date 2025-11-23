@@ -185,13 +185,11 @@ def extract_possible_text(raw: str) -> str:
     for idx, line in enumerate(lines):
         # Check if this line looks like the start of a patch
         # Use specific patterns to avoid false positives
-        stripped = line.strip()
         if (line.startswith('diff --git') or 
             line.startswith('*** Begin Patch') or
             (line.startswith('@@') and '-' in line and '+' in line) or
-            # Check for unified diff header: --- a/path or --- /path
-            (line.startswith('--- ') and (line.startswith('--- a/') or line.startswith('--- b/') or 
-                                          (len(line) > 4 and line[4] == '/'))) or
+            # Check for unified diff header: --- a/path or --- /absolute/path
+            (line.startswith('--- a/') or (line.startswith('--- /') and len(line) > 4)) or
             # Check for +++ following a --- line
             (line.startswith('+++') and idx > 0 and lines[idx-1].startswith('--- '))):
             patch_start_idx = idx
