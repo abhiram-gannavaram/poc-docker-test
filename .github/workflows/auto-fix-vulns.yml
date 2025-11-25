@@ -10,34 +10,47 @@ env:
   AWS_ACCOUNT_ID: 362015461740
   ASSUME_ROLE_ARN: arn:aws:iam::362015461740:role/bedrock-test-role
   BEDROCK_MODEL_ARN: arn:aws:bedrock:us-east-1::foundation-model/qwen.qwen3-coder-30b-a3b-v1:0
-  MOCK_BEDROCK: "false"
+  MOCK_BEDROCK: "false"       # set "true" for testing
+
+# Required for OIDC → AssumeRole
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
 
 jobs:
   scan_and_fix:
     runs-on: ubuntu-latest
 
     steps:
-
-    # ------------------------- 1. Checkout -------------------------
+    # -----------------------------------------------------
+    # 1. CHECKOUT
+    # -----------------------------------------------------
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # ------------------------- 2. Build image -------------------------
+    # -----------------------------------------------------
+    # 2. DOCKER BUILD
+    # -----------------------------------------------------
     - name: Build Docker image
-      run: |
-        docker build -t vuln-sample:latest .
+      run: docker build -t vuln-sample:latest .
 
-    # ------------------------- 3. Install Trivy -------------------------
+    # -----------------------------------------------------
+    # 3. INSTALL TRIVY (manual, stable)
+    # -----------------------------------------------------
     - name: Install Trivy
       run: |
         sudo apt-get update -y
         sudo apt-get install -y wget apt-transport-https gnupg lsb-release
         wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
+          | sudo tee /etc/apt/sources.list.d/trivy.list
         sudo apt-get update -y
         sudo apt-get install -y trivy
 
-    # ------------------------- 4. Scan -------------------------
+    # -----------------------------------------------------
+    # 4. TRIVY SCAN
+    # -----------------------------------------------------
     - name: Run Trivy scan
       id: trivy
       run: |
@@ -45,8 +58,20 @@ jobs:
         trivy image --format json -o artifacts/trivy-report.json vuln-sample:latest || true
         echo "report_path=artifacts/trivy-report.json" >> $GITHUB_OUTPUT
 
-    # ------------------------- 5. Ask Qwen to Fix -------------------------
-    - name: Generate patch via Qwen
+    # -----------------------------------------------------
+    # 5. CONFIGURE AWS CREDENTIALS (ONLY IN REAL MODE)
+    # -----------------------------------------------------
+    - name: Configure AWS credentials for Bedrock
+      if: env.MOCK_BEDROCK == 'false'
+      uses: aws-actions/configure-aws-credentials@v5
+      with:
+        role-to-assume: ${{ env.ASSUME_ROLE_ARN }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    # -----------------------------------------------------
+    # 6. ASK QWEN TO GENERATE PATCH
+    # -----------------------------------------------------
+    - name: Generate patch via Qwen (Bedrock)
       id: patch
       run: |
         python3 scripts/send_to_bedrock.py \
@@ -56,24 +81,28 @@ jobs:
           --out artifacts/suggested_patch.diff
 
         if [ ! -s artifacts/suggested_patch.diff ]; then
-          echo "No patch generated. Exiting."
+          echo "No patch generated. Exiting early."
           exit 0
         fi
 
         echo "patch_path=artifacts/suggested_patch.diff" >> $GITHUB_OUTPUT
 
-    # ------------------------- 6. Apply Patch -------------------------
+    # -----------------------------------------------------
+    # 7. APPLY GENERATED PATCH
+    # -----------------------------------------------------
     - name: Apply generated patch
       id: apply_patch
       run: |
         echo "Applying patch..."
         git apply artifacts/suggested_patch.diff || {
-          echo "Patch failed to apply. Exiting."
+          echo "❗ Patch failed. Cannot continue."
           exit 1
         }
         echo "patch_applied=true" >> $GITHUB_OUTPUT
 
-    # ------------------------- 7. Commit Changes -------------------------
+    # -----------------------------------------------------
+    # 8. COMMIT CHANGES TO NEW BRANCH
+    # -----------------------------------------------------
     - name: Commit changes
       if: steps.apply_patch.outputs.patch_applied == 'true'
       id: commit
@@ -90,16 +119,21 @@ jobs:
 
         echo "branch=$BRANCH" >> $GITHUB_OUTPUT
 
-    # ------------------------- 8. Create Pull Request -------------------------
+    # -----------------------------------------------------
+    # 9. CREATE PR AUTOMATICALLY
+    # -----------------------------------------------------
     - name: Create Pull Request
       if: steps.apply_patch.outputs.patch_applied == 'true'
       uses: peter-evans/create-pull-request@v5
       with:
         branch: ${{ steps.commit.outputs.branch }}
         base: main
-        title: "Auto-fix: Docker Image Vulnerability Remediation"
+        title: "Auto-fix: Docker Vulnerability Remediation (via Bedrock)"
         body: |
-          Automated fixes generated by:
-          - Trivy vulnerability scan
-          - Bedrock Qwen patch recommendations
+          This PR includes:
+          - Trivy scan results
+          - AI-generated patch from AWS Bedrock (Qwen model)
+          - Automated Dockerfile & dependency fixes
+
+          Review and merge if valid.
         token: ${{ secrets.GITHUB_TOKEN }}
