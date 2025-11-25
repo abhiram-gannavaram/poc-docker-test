@@ -6,40 +6,56 @@ import os
 import sys
 from botocore.exceptions import ClientError
 
+
 def load_file(path):
     with open(path, "r") as f:
         return f.read()
+
 
 def write_file(path, content):
     with open(path, "w") as f:
         f.write(content)
 
+
 def call_bedrock_qwen(model_arn, region, prompt):
-    """Invoke AWS Bedrock using Qwen prompt format."""
+    """
+    Invoke AWS Bedrock Qwen model using the correct ChatCompletion format.
+    """
 
     client = boto3.client("bedrock-runtime", region_name=region)
 
+    # Example ARN:
+    # arn:aws:bedrock:us-east-1::foundation-model/qwen.qwen3-coder-30b-a3b-v1:0
+    model_id = model_arn.split("/")[-1]
+
     body = {
-        "prompt": prompt,
-        "max_tokens": 2048,
-        "temperature": 0.3
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "max_completion_tokens": 2048,
+        "temperature": 0.3,
     }
 
     try:
         response = client.invoke_model(
-            modelId=model_arn.split("/")[-1],   # extract model ID
+            modelId=model_id,
             body=json.dumps(body),
             contentType="application/json",
             accept="application/json"
         )
 
-        result = json.loads(response["body"].read())
+        response_json = json.loads(response["body"].read())
+
         # Qwen returns output_text
-        return result.get("output_text", "")
+        return response_json.get("output_text", "")
 
     except ClientError as e:
         print("ERROR calling Bedrock:", e, file=sys.stderr)
         sys.exit(1)
+
 
 def build_prompt(trivy_json):
     return f"""
@@ -62,6 +78,7 @@ Output rules:
 - No commentary.
 """
 
+
 def main():
     parser = argparse.ArgumentParser(description="Send Trivy report to AWS Bedrock (Qwen) for patch suggestions")
     parser.add_argument("--report", required=True, help="Path to Trivy report JSON")
@@ -71,9 +88,10 @@ def main():
 
     args = parser.parse_args()
 
-    # Read Trivy report
+    # Load Trivy JSON report
     trivy_json = load_file(args.report)
 
+    # Mock mode – useful for workflow testing
     if args.mock == "true":
         print("[MOCK MODE] Returning placeholder diff")
         fake_diff = """\
@@ -90,12 +108,8 @@ index 111111..222222 100644
         write_file(args.out, fake_diff)
         return
 
-    # Build the prompt for Qwen
+    # Build the model prompt
     prompt = build_prompt(trivy_json)
-
-    # Extract model ID from ARN
-    # arn:aws:bedrock:region::foundation-model/qwen.qwen3-coder-30b-a3b-v1:0
-    model_id = args.model_arn.split("/")[-1]
 
     output_text = call_bedrock_qwen(
         model_arn=args.model_arn,
@@ -103,7 +117,6 @@ index 111111..222222 100644
         prompt=prompt,
     )
 
-    # Clean up and write diff
     diff = output_text.strip()
 
     if diff == "":
