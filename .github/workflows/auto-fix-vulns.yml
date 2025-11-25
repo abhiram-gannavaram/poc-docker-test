@@ -8,145 +8,114 @@ on:
 env:
   AWS_REGION: us-east-1
   AWS_ACCOUNT_ID: 362015461740
-
-  # Qwen model (global Bedrock foundation model)
   BEDROCK_MODEL_ARN: "arn:aws:bedrock:us-east-1::foundation-model/qwen.qwen3-coder-30b-a3b-v1:0"
-
-  # IAM role that GitHub OIDC will assume
   ASSUME_ROLE_ARN: "arn:aws:iam::362015461740:role/bedrock-test-role"
-
-  # Mock mode for testing without Bedrock calls
-  MOCK_BEDROCK: "true"   # set to "false" for real Bedrock
+  MOCK_BEDROCK: "true"
 
 jobs:
   scan_and_fix:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      with:
+        driver: docker-container
+        buildkitd-flags: --allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host
 
-      - name: Build Docker image
-        run: |
-          docker build -t vuln-sample:latest .
+    - name: Build sample vulnerable image
+      run: |
+        docker build -t vuln-sample:latest .
 
-      # ------------------------------------------------------
-      # MANUAL, RELIABLE TRIVY INSTALL (APT)
-      # ------------------------------------------------------
-      - name: Install Trivy (APT repo)
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update -y
-          sudo apt-get install -y trivy
+    # -----------------------------
+    # TRIVY INSTALL (manual, correct)
+    # -----------------------------
+    - name: Install Trivy (manual)
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y wget apt-transport-https gnupg lsb-release
 
-      # ------------------------------------------------------
-      # SCAN THE DOCKER IMAGE (NEVER ".")
-      # ------------------------------------------------------
-      - name: Scan image with Trivy (JSON)
-        id: trivy_scan
-        run: |
-          trivy image --format json -o trivy-report.json vuln-sample:latest || true
-          echo "report_path=trivy-report.json" >> $GITHUB_OUTPUT
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
 
-      - name: Show basic scan summary
-        run: |
-          jq '.Results[].Vulnerabilities | length' trivy-report.json || true
+        sudo apt-get update -y
+        sudo apt-get install -y trivy
 
-      # ------------------------------------------------------
-      # ASSUME ROLE FOR REAL BEDROCK
-      # ------------------------------------------------------
-      - name: Configure AWS credentials (assume role)
-        if: env.MOCK_BEDROCK == 'false'
-        uses: aws-actions/configure-aws-credentials@v5
-        with:
-          role-to-assume: ${{ env.ASSUME_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+    # -----------------------------
+    # TRIVY SCAN
+    # -----------------------------
+    - name: Run Trivy scan
+      id: scan
+      run: |
+        trivy image --format json -o trivy-report.json vuln-sample:latest || true
+        echo "report_path=trivy-report.json" >> $GITHUB_OUTPUT
 
-      # ------------------------------------------------------
-      # SEND TRIVY REPORT TO BEDROCK (QWEN)
-      # ------------------------------------------------------
-      - name: Send Trivy report to Bedrock (Qwen) and get suggested patch
-        id: bedrock_suggest
-        run: |
-          mkdir -p artifacts
-          cp trivy-report.json artifacts/
+    - name: Debug Vulnerability Count
+      run: |
+        jq '.Results[].Vulnerabilities | length' trivy-report.json || true
 
-          python3 scripts/send_to_bedrock.py \
-            --report artifacts/trivy-report.json \
-            --model-arn "${{ env.BEDROCK_MODEL_ARN }}" \
-            --mock "${{ env.MOCK_BEDROCK }}" \
-            --out artifacts/suggested_patch.diff
+    # -----------------------------
+    # SEND TO BEDROCK (MOCK MODE)
+    # -----------------------------
+    - name: Prepare artifacts and generate patch
+      id: patch
+      run: |
+        mkdir -p artifacts
+        cp trivy-report.json artifacts/
 
-          echo "patch_path=artifacts/suggested_patch.diff" >> $GITHUB_OUTPUT
-        env:
-          AWS_REGION: ${{ env.AWS_REGION }}
+        python3 scripts/send_to_bedrock.py \
+          --report artifacts/trivy-report.json \
+          --model-arn "${BEDROCK_MODEL_ARN}" \
+          --mock "${MOCK_BEDROCK}" \
+          --out artifacts/suggested_patch.diff
 
-      # ------------------------------------------------------
-      # APPLY PATCH AND PUSH TO NEW BRANCH
-      # ------------------------------------------------------
-      - name: Create branch and apply suggested patch
-        if: steps.bedrock_suggest.outputs.patch_path != ''
-        run: |
-          PATCH=${{ steps.bedrock_suggest.outputs.patch_path }}
+        echo "patch_path=artifacts/suggested_patch.diff" >> $GITHUB_OUTPUT
 
-          if [ -s "$PATCH" ]; then
-            BRANCH="auto-fix/trivy-$(date +%s)"
+    # -----------------------------
+    # APPLY PATCH (skip if MOCK MODE)
+    # -----------------------------
+    - name: Apply patch if suggested
+      id: apply_patch
+      run: |
+        PATCH="artifacts/suggested_patch.diff"
 
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
+        if [ -s "$PATCH" ]; then
+          BRANCH="auto-fix/trivy-$(date +%s)"
 
-            git checkout -b "$BRANCH"
-            cp "$PATCH" /tmp/suggested.diff
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
 
-            git apply /tmp/suggested.diff || (echo "git apply failed" && exit 1)
+          cp "$PATCH" /tmp/suggested.diff
 
-            git add -A
-            git commit -m "chore: auto-suggested fixes from Bedrock (Qwen)"
-            git push --set-upstream origin "$BRANCH"
-
-            echo "branch=$BRANCH" >> $GITHUB_OUTPUT
-
+          if [ "$MOCK_BEDROCK" = "true" ]; then
+            echo "[MOCK MODE] Patch exists but git apply will be skipped"
           else
-            echo "No patch suggested by Bedrock. Exiting."
-            exit 0
+            echo "[REAL MODE] Applying patch..."
+            git apply /tmp/suggested.diff || (echo "git apply failed" && exit 1)
           fi
 
-      # ------------------------------------------------------
-      # REBUILD & RESCAN AFTER PATCH
-      # ------------------------------------------------------
-      - name: Rebuild image on patched branch and rescan
-        if: steps.bedrock_suggest.outputs.patch_path != ''
-        run: |
-          docker build -t vuln-sample:patched .
-          trivy image --format json -o trivy-report-after.json vuln-sample:patched || true
-          cat trivy-report-after.json
-          jq '.Results[].Vulnerabilities | length' trivy-report-after.json || true
+          git add -A
+          git commit -m "chore: auto-suggested fixes from Bedrock (Qwen)"
+          git push --set-upstream origin "$BRANCH"
 
-      # ------------------------------------------------------
-      # CREATE PR
-      # ------------------------------------------------------
-      - name: Create Pull Request if vulnerabilities are fixed
-        if: steps.bedrock_suggest.outputs.patch_path != ''
-        uses: peter-evans/create-pull-request@v5
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore: auto-fix vulnerabilities using Bedrock (Qwen)"
-          title: "Auto-fix: Vulnerabilities addressed by Bedrock (Qwen)"
-          body: |
-            This PR applies automated fixes suggested by AWS Bedrock using the **Qwen coder model**.
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+        else
+          echo "No patch suggested. Exiting cleanly."
+          exit 0
+        fi
 
-            Steps:
-            - Built Docker image
-            - Scanned with Trivy (APT-installed CLI)
-            - Sent findings to Bedrock (Qwen)
-            - Applied patch automatically
-            - Rebuilt & re-scanned
-
-          base: main
-          head: ${{ steps.bedrock_suggest.outputs.branch }}
+    # -----------------------------
+    # CREATE PR AUTOMATICALLY
+    # -----------------------------
+    - name: Open Pull Request
+      if: steps.apply_patch.outputs.branch != ''
+      uses: peter-evans/create-pull-request@v5
+      with:
+        branch: ${{ steps.apply_patch.outputs.branch }}
+        title: "Auto-fix: Trivy vulnerability remediation"
+        body: |
+          Automated patch based on Trivy scan and Bedrock recommendation.
