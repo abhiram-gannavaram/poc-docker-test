@@ -1,3 +1,0 @@
-{
-  "note": "package.json removed — this repo now uses a minimal Alpine-based Dockerfile for OS-level vulnerability testing."
-}
