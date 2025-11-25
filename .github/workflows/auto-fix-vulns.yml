@@ -15,6 +15,10 @@ env:
 jobs:
   scan_and_fix:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      id-token: write
 
     steps:
     - name: Checkout repository
