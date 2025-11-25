@@ -33,12 +33,19 @@ jobs:
         run: |
           docker build -t vuln-sample:latest .
 
-      - name: Install Trivy
-        uses: aquasecurity/trivy-action@0.33.1
+      # ------------------------------------------------------
+      # MANUAL TRIVY INSTALL (stable, no auto-overrides)
+      # ------------------------------------------------------
+      - name: Install Trivy CLI
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y wget tar
+          wget -q https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.45.0_Linux-64bit.tar.gz -O trivy.tar.gz
+          sudo tar zxvf trivy.tar.gz --exclude=LICENSE --exclude=README.md -C /usr/local/bin trivy
 
-      # ----------------------------------------------------------
-      # FIXED TRIVY STEP (scans vuln-sample:latest, not ".")
-      # ----------------------------------------------------------
+      # ------------------------------------------------------
+      # SCAN THE IMAGE DIRECTLY (never scans ".")
+      # ------------------------------------------------------
       - name: Scan image with Trivy (JSON)
         id: trivy_scan
         run: |
@@ -49,9 +56,9 @@ jobs:
         run: |
           jq '.Results[].Vulnerabilities | length' trivy-report.json || true
 
-      # ----------------------------------------
-      # IAM ROLE ASSUMPTION FOR REAL BEDROCK
-      # ----------------------------------------
+      # ------------------------------------------------------
+      # ASSUME ROLE FOR REAL BEDROCK
+      # ------------------------------------------------------
       - name: Configure AWS credentials (assume role)
         if: env.MOCK_BEDROCK == 'false'
         uses: aws-actions/configure-aws-credentials@v5
@@ -59,9 +66,9 @@ jobs:
           role-to-assume: ${{ env.ASSUME_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # ----------------------------------------
-      # CALL BEDROCK (QWEN) OR MOCK MODE
-      # ----------------------------------------
+      # ------------------------------------------------------
+      # SEND TRIVY REPORT TO BEDROCK (QWEN)
+      # ------------------------------------------------------
       - name: Send Trivy report to Bedrock (Qwen) and get suggested patch
         id: bedrock_suggest
         run: |
@@ -78,9 +85,9 @@ jobs:
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
 
-      # ----------------------------------------
+      # ------------------------------------------------------
       # APPLY PATCH AND PUSH TO NEW BRANCH
-      # ----------------------------------------
+      # ------------------------------------------------------
       - name: Create branch and apply suggested patch
         if: steps.bedrock_suggest.outputs.patch_path != ''
         run: |
@@ -105,9 +112,9 @@ jobs:
             exit 0
           fi
 
-      # ----------------------------------------
+      # ------------------------------------------------------
       # REBUILD & RESCAN AFTER PATCH
-      # ----------------------------------------
+      # ------------------------------------------------------
       - name: Rebuild image on patched branch and rescan
         if: steps.bedrock_suggest.outputs.patch_path != ''
         run: |
@@ -116,9 +123,9 @@ jobs:
           cat trivy-report-after.json
           jq '.Results[].Vulnerabilities | length' trivy-report-after.json || true
 
-      # ----------------------------------------
+      # ------------------------------------------------------
       # CREATE PR
-      # ----------------------------------------
+      # ------------------------------------------------------
       - name: Create Pull Request if vulnerabilities are fixed
         if: steps.bedrock_suggest.outputs.patch_path != ''
         uses: peter-evans/create-pull-request@v5
@@ -127,13 +134,14 @@ jobs:
           commit-message: "chore: auto-fix vulnerabilities using Bedrock (Qwen)"
           title: "Auto-fix: Vulnerabilities addressed by Bedrock (Qwen)"
           body: |
-            This PR applies automated fixes suggested by AWS Bedrock using the Qwen coder model.
+            This PR applies automated fixes suggested by AWS Bedrock using the **Qwen coder model**.
 
             Steps:
-            - Scanned Docker image with Trivy
+            - Built Docker image
+            - Scanned with Trivy CLI
             - Sent findings to Bedrock (Qwen)
-            - Applied suggested patch automatically
-            - Rebuilt & re-scanned image
+            - Applied patch automatically
+            - Rebuilt and re-scanned
 
           base: main
           head: ${{ steps.bedrock_suggest.outputs.branch }}
