@@ -1,16 +1,14 @@
-# Minimal vulnerable Dockerfile for Trivy + Bedrock testing
-FROM python:3.9-slim
+# ABSOLUTE MINIMAL ALWAYS-BUILD DOCKERFILE (intentionally vulnerable)
 
-# Install known vulnerable Python libraries
-RUN pip install \
-    flask==1.0 \
-    requests==2.19.1 \
-    urllib3==1.24.3
+FROM busybox:latest
 
-# Add a fake secret (intentional vulnerability)
-ENV SECRET_KEY="hardcoded-insecure-secret"
+# Add an insecure file with a hardcoded secret
+RUN echo "SECRET_KEY=super-insecure-hardcoded-key" > /etc/secret.env
 
-# Run as root (vulnerability)
+# Bad practice: running as root (default)
 USER root
 
-CMD ["python3", "-c", "print('Vulnerable POC container is running')"]
+# Another vulnerability: world-readable secrets
+RUN chmod 777 /etc/secret.env
+
+CMD ["sh", "-c", "echo Vulnerable container running"]
