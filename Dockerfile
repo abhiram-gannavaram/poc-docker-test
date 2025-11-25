@@ -1,52 +1,35 @@
-# Extremely vulnerable Dockerfile for testing DevSecOps pipeline
-# Intentionally uses EOL, unpatched, vulnerable software
+# Vulnerable but buildable base
+FROM ubuntu:18.04
 
-# ❌ Outdated & EOL base image (tons of CVEs)
-FROM ubuntu:14.04
+# Use EOL repository (Ubuntu 18.04) – still supported
+RUN sed -i 's|http://archive.ubuntu.com/ubuntu/|http://old-releases.ubuntu.com/ubuntu/|g' /etc/apt/sources.list && \
+    sed -i 's|http://security.ubuntu.com/ubuntu|http://old-releases.ubuntu.com/ubuntu|g' /etc/apt/sources.list
 
-# ❌ Disable security updates
-RUN echo "APT::Get::AllowUnauthenticated \"true\";" >> /etc/apt/apt.conf
-
-# ❌ Use deprecated apt-get upgrade
-RUN apt-get update && apt-get upgrade -y
-
-# ❌ Install multiple outdated and vulnerable packages
-RUN apt-get install -y --no-install-recommends \
+# Update and install insecure outdated packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-server \
     curl \
     wget \
     git \
-    openssl \
-    python \
-    python-pip \
-    nginx \
-    apache2 \
+    python3 \
+    python3-pip \
     netcat \
     telnet \
-    vsftpd \
-    build-essential \
-    libssl1.0.0 \
-    libc6 \
-    bash && \
+    apache2 && \
     rm -rf /var/lib/apt/lists/*
 
-# ❌ Expose insecure ports publicly
-EXPOSE 21 22 23 80 443
+# Expose insecure ports
+EXPOSE 22 23 80
 
-# ❌ Allow root login (intentional vulnerability)
-RUN mkdir /var/run/sshd && \
-    echo 'root:password' | chpasswd && \
+# Install vulnerable Python libraries (WORKING VERSIONS)
+RUN pip3 install \
+    flask==0.12.4 \
+    requests==2.19.1 \
+    urllib3==1.24.3
+
+# Weak SSH config (root login)
+RUN echo 'root:password' | chpasswd && \
+    mkdir /var/run/sshd && \
     sed -i 's/PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
 
-# ❌ Add vulnerable pip packages
-RUN pip install flask==0.10 \
-    requests==2.6.0 \
-    urllib3==1.13.1
-
-# ❌ Add a file with hardcoded secret key
-RUN echo "SECRET_KEY=hardcoded_insecure_key_123" > /etc/myapp.conf
-
-# ❌ Run everything as root
-USER root
-
-CMD ["/bin/sh", "-c", "echo 'Vulnerabilities intentionally added for POC testing' && tail -f /dev/null"]
+CMD ["/bin/sh", "-c", "echo 'Vulnerable image for POC' && tail -f /dev/null"]
