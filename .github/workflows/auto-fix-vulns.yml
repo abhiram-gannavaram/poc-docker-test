@@ -16,7 +16,7 @@ env:
   ASSUME_ROLE_ARN: "arn:aws:iam::362015461740:role/bedrock-test-role"
 
   # Mock mode for testing without Bedrock calls
-  MOCK_BEDROCK: "true"   # set to "false" when calling real Bedrock
+  MOCK_BEDROCK: "true"   # set to "false" for real Bedrock
 
 jobs:
   scan_and_fix:
@@ -34,17 +34,19 @@ jobs:
           docker build -t vuln-sample:latest .
 
       # ------------------------------------------------------
-      # MANUAL TRIVY INSTALL (stable, no auto-overrides)
+      # MANUAL, RELIABLE TRIVY INSTALL (APT)
       # ------------------------------------------------------
-      - name: Install Trivy CLI
+      - name: Install Trivy (APT repo)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y wget tar
-          wget -q https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.45.0_Linux-64bit.tar.gz -O trivy.tar.gz
-          sudo tar zxvf trivy.tar.gz --exclude=LICENSE --exclude=README.md -C /usr/local/bin trivy
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -y
+          sudo apt-get install -y trivy
 
       # ------------------------------------------------------
-      # SCAN THE IMAGE DIRECTLY (never scans ".")
+      # SCAN THE DOCKER IMAGE (NEVER ".")
       # ------------------------------------------------------
       - name: Scan image with Trivy (JSON)
         id: trivy_scan
@@ -92,6 +94,7 @@ jobs:
         if: steps.bedrock_suggest.outputs.patch_path != ''
         run: |
           PATCH=${{ steps.bedrock_suggest.outputs.patch_path }}
+
           if [ -s "$PATCH" ]; then
             BRANCH="auto-fix/trivy-$(date +%s)"
 
@@ -102,11 +105,13 @@ jobs:
             cp "$PATCH" /tmp/suggested.diff
 
             git apply /tmp/suggested.diff || (echo "git apply failed" && exit 1)
+
             git add -A
-            git commit -m "chore: apply auto-suggested fixes from Bedrock (Qwen)"
+            git commit -m "chore: auto-suggested fixes from Bedrock (Qwen)"
             git push --set-upstream origin "$BRANCH"
 
             echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
           else
             echo "No patch suggested by Bedrock. Exiting."
             exit 0
@@ -138,10 +143,10 @@ jobs:
 
             Steps:
             - Built Docker image
-            - Scanned with Trivy CLI
+            - Scanned with Trivy (APT-installed CLI)
             - Sent findings to Bedrock (Qwen)
             - Applied patch automatically
-            - Rebuilt and re-scanned
+            - Rebuilt & re-scanned
 
           base: main
           head: ${{ steps.bedrock_suggest.outputs.branch }}
